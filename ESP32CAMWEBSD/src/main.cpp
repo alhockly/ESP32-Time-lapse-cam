@@ -49,8 +49,8 @@
 int pictureNumber = 0;
 bool SDMounted = false;
 
-const char* ssid = "TrilliumKillinEm";  //WiFi SSID
-const char* password = "Despacito2";    //WiFi Password
+const char* ssid = "";  //WiFi SSID
+const char* password = "";    //WiFi Password
 
 AsyncWebServer server(80);
 
