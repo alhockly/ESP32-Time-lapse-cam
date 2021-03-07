@@ -2,6 +2,10 @@
 Turn an ESP32-CAM into a time lapse camera and pull images remotely over the network
 
 
+https://user-images.githubusercontent.com/17460510/110241989-c2a80c80-7f4b-11eb-919c-69ebc12154a0.mp4
+
+
+
 This repo contains a Platformio project that can be opened in Visual Studio Code and a python script to download files from the ESP32-CAM
 
 ## Setup
