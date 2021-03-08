@@ -15,7 +15,12 @@ This repo contains a Platformio project that can be opened in Visual Studio Code
 
 
 The ESP32 software implements the following endpoints via a webserver:
+
 /list
+
 /download e.g `/download?file=<fileName>`
+
 /latest
+
 /time
+
