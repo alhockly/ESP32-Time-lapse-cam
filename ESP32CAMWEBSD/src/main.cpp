@@ -17,12 +17,15 @@
 #include "Arduino.h"
 #include "FS.h"                // SD Card ESP32
 #include "SD_MMC.h"            // SD Card ESP32
-#include "soc/soc.h"           // Disable brownour problems
-#include "soc/rtc_cntl_reg.h"  // Disable brownour problems
+#include "soc/soc.h"           // Disable brownout problems
+#include "soc/rtc_cntl_reg.h"  // Disable brownout problems
 #include "driver/rtc_io.h"
 #include <EEPROM.h>            // read and write from flash memory
 #include <ESPAsyncWebServer.h>
-#include "esp_task_wdt.h"
+#include "esp_task_wdt.h"      //to feed the task watchdog
+#include <vector>
+#include <algorithm>
+#include "WifiCredentials.h"
 
 // define the number of bytes you want to access
 #define EEPROM_SIZE 1
@@ -46,18 +49,15 @@
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-int pictureNumber = 0;
 bool SDMounted = false;
-
-const char* ssid = "";  //WiFi SSID
-const char* password = "";    //WiFi Password
 
 AsyncWebServer server(80);
 
+std::vector<String> files;
 long numImages;
 String latestFile;
-const int FILE_LIST_SIZE = 255;
-String files[FILE_LIST_SIZE];
+
+
 long MAX_NUMBER_OF_FILES = 300; //Number of files to create before starting to delete old ones. This is a balance between speed of the /list endpoint
                                 // and how far back the timelapse images on the SD go 
 
@@ -81,19 +81,18 @@ const char index_html[] PROGMEM = R"rawliteral(
   </body>  
 </html>)rawliteral";
 
-String listDir(fs::FS &fs, const char * dirname, uint8_t max_files){
-    //sets string array to contain file list, updates number of images count, returns full list
+void listDir(fs::FS &fs, const char * dirname, uint8_t max_files){
+    //sets vector array to contain file list, updates number of images count
     //Serial.printf("Listing directory: %s\n", dirname);
-    String fileList = String("");
-   
+    files.clear();
     File root = fs.open(dirname);
     if(!root){
         Serial.println("Failed to open directory");
-        return "";
+        return;
     }
     if(!root.isDirectory()){
         Serial.println("Not a directory");
-        return "";
+        return;
     }
 
     File file = root.openNextFile();
@@ -104,31 +103,26 @@ String listDir(fs::FS &fs, const char * dirname, uint8_t max_files){
         if(max_files > 0 && fileCount > max_files){
           break;
         }
-        if(file.isDirectory()){
-            //Serial.print("  DIR : ");
-            //Serial.println(file.name());
+        if(!file.isDirectory()){
             
-        } else {
-            //Serial.print("  FILE: ");
-            //Serial.print(file.name());
-            fileList += file.name() + String("\n");
-            if(fileCount<FILE_LIST_SIZE){
-              files[fileCount] = file.name();
-            }
+            files.push_back(file.name());
             fileCount += 1;
             //Serial.print("  SIZE: ");
             //Serial.println(file.size());
         }
-
         
+
         file = root.openNextFile();
     }
-    numImages = fileCount;
-    //Serial.println(fileList);
-    // for(int i=0;i<FILE_LIST_SIZE;i++){
-    //   Serial.println(files[i]);
+    std::sort(files.begin(), files.end());
+    // for (int i = 0; i < files.size(); i++){
+    //     Serial.println(files[i]);
     // }
-    return fileList;
+   
+
+    numImages = fileCount;
+    
+    return;
 }
 
 void deleteFile(fs::FS &fs, const char * path){
@@ -213,21 +207,22 @@ void setup() {
 
   uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
   Serial.printf("SD_MMC Card Size: %lluMB\n", cardSize);
-  Serial.println(("Listing files"));
-  listDir(SD_MMC, "/", 0);
+  //Serial.println(("Listing files"));
+  //listDir(SD_MMC, "/", 0);
   
   Serial.println("Connecting to Wifi");
-  WiFi.begin(ssid, password);
+  WiFi.begin(SSID, PASS);
   // Wait for connection
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
     delay(2000);
-    WiFi.begin(ssid, password);
+    WiFi.begin(SSID, PASS);
   }
 
   Serial.println("");
   Serial.print("Connected to: ");
-  Serial.println(ssid);
+  Serial.println(SSID);
+  
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
@@ -274,12 +269,12 @@ server.on("/list", HTTP_GET, [](AsyncWebServerRequest *request){
   Serial.println(request->client()->remoteIP());
   if(SDMounted){
     
-    String filesList = listDir(SD_MMC, "/", 0);
-    File file = SD_MMC.open(latestFile, FILE_READ);
-    if(!file){
-      Serial.println(" Failed to open file for reading");
-      return;
+    listDir(SD_MMC, "/", 0);
+    String filesList;
+    for (int i = 0; i < files.size(); i++){
+        filesList += String(files[i]) + String("\n");
     }
+
     request->send(200, "text/plain", filesList);
     Serial.print(numImages);
     Serial.println(" images found");
@@ -340,7 +335,7 @@ void takePicAndSave(){
   refreshNetworkTime();
 
   listDir(SD_MMC, "/", 0);
-  if(numImages > MAX_NUMBER_OF_FILES){
+  if(numImages >= MAX_NUMBER_OF_FILES){
     Serial.print(numImages);
     Serial.println(" images found. Deleting oldest file");
     deleteFile(SD_MMC, files[0].c_str());
