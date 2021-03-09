@@ -1,16 +1,12 @@
 /*********
-  Rui Santos
-  Complete project details at https://RandomNerdTutorials.com/esp32-cam-take-photo-save-microsd-card
+  Picture capturing function taken from
+  Rui Santos --  https://RandomNerdTutorials.com/esp32-cam-take-photo-save-microsd-card
   
   IMPORTANT!!! 
-   - Select Board "AI Thinker ESP32-CAM"
    - GPIO 0 must be connected to GND to upload a sketch
    - After connecting GPIO 0 to GND, press the ESP32-CAM on-board RESET button to put your board in flashing mode
-  
-  Permission is hereby granted, free of charge, to any person obtaining a copy
-  of this software and associated documentation files.
-  The above copyright notice and this permission notice shall be included in all
-  copies or substantial portions of the Software.
+   - You may need to supply power to ESP board seperately 
+
 *********/
 
 #include "esp_camera.h"
@@ -25,7 +21,7 @@
 #include "esp_task_wdt.h"      //to feed the task watchdog
 #include <vector>
 #include <algorithm>
-#include "WifiCredentials.h"
+#include "WifiCredentials.h"  
 
 // define the number of bytes you want to access
 #define EEPROM_SIZE 1
@@ -82,47 +78,46 @@ const char index_html[] PROGMEM = R"rawliteral(
 </html>)rawliteral";
 
 void listDir(fs::FS &fs, const char * dirname, uint8_t max_files){
-    //sets vector array to contain file list, updates number of images count
-    //Serial.printf("Listing directory: %s\n", dirname);
-    files.clear();
-    File root = fs.open(dirname);
-    if(!root){
-        Serial.println("Failed to open directory");
-        return;
-    }
-    if(!root.isDirectory()){
-        Serial.println("Not a directory");
-        return;
-    }
+  //sets vector array to contain file list, updates number of images count
+  //Serial.printf("Listing directory: %s\n", dirname);
+  files.clear();
+  File root = fs.open(dirname);
+  if(!root){
+      Serial.println("Failed to open directory");
+      return;
+  }
+  if(!root.isDirectory()){
+      Serial.println("Not a directory");
+      return;
+  }
 
-    File file = root.openNextFile();
-    long fileCount = 0;
-    while(file){
-        esp_task_wdt_reset();
-        
-        if(max_files > 0 && fileCount > max_files){
-          break;
-        }
-        if(!file.isDirectory()){
-            
-            files.push_back(file.name());
-            fileCount += 1;
-            //Serial.print("  SIZE: ");
-            //Serial.println(file.size());
-        }
-        
-
-        file = root.openNextFile();
-    }
-    std::sort(files.begin(), files.end());
-    // for (int i = 0; i < files.size(); i++){
-    //     Serial.println(files[i]);
-    // }
-   
-
-    numImages = fileCount;
+  File file = root.openNextFile();
+  long fileCount = 0;
+  while(file){
+    esp_task_wdt_reset();
     
-    return;
+    if(max_files > 0 && fileCount > max_files){
+      break;
+    }
+    if(!file.isDirectory()){
+        
+        files.push_back(file.name());
+        fileCount += 1;
+        //Serial.print("  SIZE: ");
+        //Serial.println(file.size());
+    }
+    
+    file = root.openNextFile();
+  }
+  std::sort(files.begin(), files.end());
+  // for (int i = 0; i < files.size(); i++){
+  //     Serial.println(files[i]);
+  // }
+  
+
+  numImages = fileCount;
+  
+  return;
 }
 
 void deleteFile(fs::FS &fs, const char * path){
@@ -193,7 +188,7 @@ void setup() {
   }
 
   sensor_t * s = esp_camera_sensor_get();
-  s -> set_lenc(s, 1);
+  s -> set_lenc(s, 1);    //turn lens correction on (good for fisheye lens)
   
   //Serial.println("Starting SD Card");
   if(!SD_MMC.begin()){
@@ -231,95 +226,95 @@ void setup() {
   
   
 
-server.on("/download", HTTP_GET, [](AsyncWebServerRequest *request){
+  server.on("/download", HTTP_GET, [](AsyncWebServerRequest *request){
+    
+    Serial.print("Recieved /download request from ");
+    Serial.println(request->client()->remoteIP());
+
+    if(SDMounted){
+
+      int paramsNr = request->params();
+      for(int i=0;i<paramsNr;i++){
   
-  Serial.print("Recieved /download request from ");
-  Serial.println(request->client()->remoteIP());
-
-  if(SDMounted){
-
-    int paramsNr = request->params();
-    for(int i=0;i<paramsNr;i++){
- 
-      AsyncWebParameter* p = request->getParam(i);
-      String paramName = p->name();
-      String paramValue = p->value();
-      if(paramName=="file"){
-        File file = SD_MMC.open(paramValue, FILE_READ);
-        if(!file){
-          Serial.println(" Failed to open file for reading");
-          request->send(404, "text/plain", "File not found");
-          return;
-        }else{
-          request->send(file, paramValue, "text/xhr", true);
+        AsyncWebParameter* p = request->getParam(i);
+        String paramName = p->name();
+        String paramValue = p->value();
+        if(paramName=="file"){
+          File file = SD_MMC.open(paramValue, FILE_READ);
+          if(!file){
+            Serial.println(" Failed to open file for reading");
+            request->send(404, "text/plain", "File not found");
+            return;
+          }else{
+            request->send(file, paramValue, "text/xhr", true);
+          }
         }
       }
+      
+    } else {
+      Serial.println("SD not mounted");
+      request->send(404, "text/plain", "SD card not mounted");
     }
-    
-  } else {
-    Serial.println("SD not mounted");
-    request->send(404, "text/plain", "SD card not mounted");
-  }
 
- });
+  });
  
 
-server.on("/list", HTTP_GET, [](AsyncWebServerRequest *request){
-  Serial.print("/list from ");
-  Serial.println(request->client()->remoteIP());
-  if(SDMounted){
-    
-    listDir(SD_MMC, "/", 0);
-    String filesList;
-    for (int i = 0; i < files.size(); i++){
-        filesList += String(files[i]) + String("\n");
+  server.on("/list", HTTP_GET, [](AsyncWebServerRequest *request){
+    Serial.print("/list from ");
+    Serial.println(request->client()->remoteIP());
+    if(SDMounted){
+      
+      listDir(SD_MMC, "/", 0);
+      String filesList;
+      for (int i = 0; i < files.size(); i++){
+          filesList += String(files[i]) + String("\n");
+      }
+
+      request->send(200, "text/plain", filesList);
+      Serial.print(numImages);
+      Serial.println(" images found");
+      
+    } else {
+      Serial.println("SD not mounted");
+      request->send(200, "text/plain", "SD not mounted");
     }
 
-    request->send(200, "text/plain", filesList);
-    Serial.print(numImages);
-    Serial.println(" images found");
+  });
+
+  server.on("/latest", HTTP_GET, [](AsyncWebServerRequest *request){
     
-  } else {
-    Serial.println("SD not mounted");
-    request->send(200, "text/plain", "SD not mounted");
-  }
-
- });
-
-server.on("/latest", HTTP_GET, [](AsyncWebServerRequest *request){
-  
-  if(SDMounted){
-    File file = SD_MMC.open(latestFile, FILE_READ);
-    if(!file){
-      Serial.println(" Failed to open file for reading");
-      request->send(404, "text/plain", "File not found");
-      return;
-    }else{
-      request->send(file, latestFile, "text/xhr", true);
+    if(SDMounted){
+      File file = SD_MMC.open(latestFile, FILE_READ);
+      if(!file){
+        Serial.println(" Failed to open file for reading");
+        request->send(404, "text/plain", "File not found");
+        return;
+      }else{
+        request->send(file, latestFile, "text/xhr", true);
+      }
+    
+    } else {
+      Serial.println("SD not mounted");
+      request->send(200, "text/plain", "SD not mounted");
     }
-   
-  } else {
-    Serial.println("SD not mounted");
-    request->send(200, "text/plain", "SD not mounted");
-  }
- });
+  });
 
 
- server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
   
-  if(SDMounted){
-    request->send_P(200, "text/html", index_html);
-  } else {
-    Serial.println("SD not mounted");
-  }
+    if(SDMounted){
+      request->send_P(200, "text/html", index_html);
+    } else {
+      Serial.println("SD not mounted");
+    }
 
- });
+  });
 
   server.on("/time", HTTP_GET, [](AsyncWebServerRequest *request){
     refreshNetworkTime();
     request->send_P(200, "text/html", lastcapture);
   
- });
+  });
 
 
   server.begin();
@@ -341,7 +336,6 @@ void takePicAndSave(){
     deleteFile(SD_MMC, files[0].c_str());
   }
    
-  
   // Take Picture with Camera
   fb = esp_camera_fb_get();  
   if(!fb) {
@@ -358,8 +352,7 @@ void takePicAndSave(){
   File file = fs.open(path.c_str(), FILE_WRITE);
   if(!file){
     Serial.println("Failed to open file in writing mode");
-  } 
-  else {
+  } else {
     file.write(fb->buf, fb->len); // payload (image), payload length
     Serial.printf("Saved file to path: %s\n", path.c_str());
     latestFile = path;
@@ -375,5 +368,4 @@ void loop() {
     takePicAndSave();
     delay(THIRTY_MINS);
   }
-  
 }
