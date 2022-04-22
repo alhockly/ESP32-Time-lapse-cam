@@ -8,7 +8,7 @@ This repo contains a Platformio project that can be opened in Visual Studio Code
 
 ## Setup
 1. Edit WifiCredentials.h to contain SSID and Password of Wifi to use
-2. upload to ESP32 via platformio (or other means)
+2. upload to ESP32 via platformio
 3. Connect ESP32 to power and allow it to start
 4. Modify python script to point to IP of ESP
 5. Run python script with arg for number of files to download e.g `python3 download.py 40`
