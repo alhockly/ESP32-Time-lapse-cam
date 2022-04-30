@@ -28,6 +28,7 @@ This has the advantage of making these parts hotswapable. Camera is not hotswapp
 #include <vector>
 #include <algorithm>
 #include "WifiCredentials.h"  
+#include "CameraDefinition.h"
 #include <WiFi.h>
 #include <WiFiMulti.h>
 #include <Wire.h>
@@ -35,26 +36,8 @@ This has the advantage of making these parts hotswapable. Camera is not hotswapp
 #include "SparkFunBME280.h" //edit this library to change the i2c address if bme is not found
 #include <SparkFun_SGP30_Arduino_Library.h>
 #include <PubSubClient.h>
+#include <WiFiClientSecure.h>
 
-
-
-// Pin definition for CAMERA_MODEL_AI_THINKER
-#define PWDN_GPIO_NUM     32
-#define RESET_GPIO_NUM    -1
-#define XCLK_GPIO_NUM      0
-#define SIOD_GPIO_NUM     26
-#define SIOC_GPIO_NUM     27
-#define Y9_GPIO_NUM       35
-#define Y8_GPIO_NUM       34
-#define Y7_GPIO_NUM       39
-#define Y6_GPIO_NUM       36
-#define Y5_GPIO_NUM       21
-#define Y4_GPIO_NUM       19
-#define Y3_GPIO_NUM       18
-#define Y2_GPIO_NUM        5
-#define VSYNC_GPIO_NUM    25
-#define HREF_GPIO_NUM     23
-#define PCLK_GPIO_NUM     22
 
 //global objects
 WiFiMulti wifiMulti;
@@ -99,8 +82,10 @@ const long  gmtOffset_sec = 0;
 const int   daylightOffset_sec = 3600;
 
 // Add your MQTT Broker IP address, example:
-const char* mqtt_server = MQTTURL;
-WiFiClient espClient;
+WiFiClientSecure espClient;
+//espClient.setInsecure();
+
+
 PubSubClient mqttclient(espClient);
 long lastMsg = 0;
 char msg[50];
@@ -305,6 +290,7 @@ void initSensors(){
 }
 
 bool mountSDCard(){
+  mqttclient.disconnect();
   if(SDmounted){
      Serial.println("SD Card already mounted :)");
      return true;
@@ -355,6 +341,11 @@ void getSensorReadings(){
   if(bmeMounted){
     humidity = bme280.readFloatHumidity();
     temp = bme280.readTempC();
+    if(temp <0){
+      temp = -1;
+      humidity = -1;
+      bmeMounted = false;
+    }
   }
 
   if(sgpMounted){
@@ -362,11 +353,6 @@ void getSensorReadings(){
     co2 = sgp30.CO2;
     tvoc = sgp30.TVOC;
   }
-
-  char s[50];
-  snprintf_P(s, sizeof(s), PSTR("{'temp':%f, 'humidity':%f, 'co2':%f, 'tvoc':%f}"), temp, humidity, co2, tvoc);
-  
-  mqttclient.publish("box/environ", s);
 }
 
 
@@ -461,6 +447,43 @@ void setLowerbound(AsyncWebServerRequest *request){
         request->send(400, "cast failed or int param not found");
       }
     }
+}
+
+void mqttreconnect() {
+  int errcount = 0;
+  // Loop until we're reconnected
+  while (!mqttclient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    String clientId = "esp32-cam";
+
+    if (mqttclient.connect(clientId.c_str(), MQTTUSER, MQTTPASS)) {
+      Serial.println("connected");
+      // Subscribe
+      mqttclient.subscribe("esp32/output");
+    } else {
+      Serial.print("failed, rc=");
+      Serial.print(mqttclient.state());
+      Serial.println(" try again in 5 seconds");
+      errcount++;
+      if(errcount>2){
+        return;
+      }
+      // Wait 5 seconds before retrying
+      delay(5000);
+      
+    }
+  }
+}
+
+void mqttPublishSensorData(){
+  if(!mqttclient.connected()){
+    mqttreconnect();
+  }
+  char s[85];
+  snprintf_P(s, sizeof(s), PSTR("{'temp':%f, 'humidity':%f, 'co2':%f, 'tvoc':%f}"), temp, humidity, co2, tvoc);
+  mqttclient.publish("box/environ", s);
+  Serial.print("data published to MQTT server");
 }
 
 void mqttMessageReceived(char* topic, byte* message, unsigned int length) {
@@ -563,7 +586,11 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
-  mqttclient.setServer(mqtt_server, 1883);
+  Serial.print("MQTT URL ");
+  Serial.println(MQTTURL);
+  Serial.print("MQTT PORT ");
+  Serial.println(MQTTPORT);
+  mqttclient.setServer(MQTTURL, MQTTPORT);
   mqttclient.setCallback(mqttMessageReceived);
 
 
@@ -696,9 +723,8 @@ void takePicAndSave(){
 }
 
 
-
 void operateDehumidifier(){   //if humidity too high turn off the dehumifier and vice-versa
-  if(bmeMounted && humidity!=(float)0){
+  if(bmeMounted !=(float)0 && humidity!=(float)0){
     Serial.println("checking dehumdifier");
     if(dehumidiferState){ //dehumidifier on
         if(humidity <= (float)lowerHumidityBound){
@@ -716,46 +742,37 @@ void operateDehumidifier(){   //if humidity too high turn off the dehumifier and
   }
 }
 
-void mqttreconnect() {
-  // Loop until we're reconnected
-  while (!mqttclient.connected()) {
-    Serial.print("Attempting MQTT connection...");
-    // Attempt to connect
-    if (mqttclient.connect("ESP8266Client")) {
-      Serial.println("connected");
-      // Subscribe
-      mqttclient.subscribe("esp32/output");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(mqttclient.state());
-      Serial.println(" try again in 5 seconds");
-      // Wait 5 seconds before retrying
-      delay(5000);
-    }
-  }
-}
+
 
 void loop() {
-  if (!mqttclient.connected()) {    //setup mqtt
-    mqttreconnect();
-  }
-  mqttclient.loop();
+  
 
   delay(1000);
   takePicAndSave(); //This method is called first so that latestFile can be set properly. It does delay startup a bit so not ideal
   delay(1000); //delay to properly save
 
+  // if (!mqttclient.connected()) {    //setup mqtt
+  //   mqttreconnect();
+  // }
+  // if(mqttclient.connected()){
+  //   //mqttclient.loop();
+  // }
+
   for (unsigned long i = 0; i < THIRTY_MINS/sensorInterval; i++) {    //exit this loop every half an hour to take pics ~
     if(!pauseSensorReading){  
+      
       getSensorReadings();
 
-
-      if(i%5){    //every other loop iteration
+      if(i%10){    //every other loop iteration
         operateDehumidifier();
+        if(bmeMounted || sgpMounted){
+          mqttPublishSensorData();
+        }
       }
 
     } else {
       pauseSensorReading = false;
+      mqttclient.disconnect();
       delay(sensorPauseTime);
       // check if pauseSensorReading has changed to true again in the delay period
       if(!pauseSensorReading){
