@@ -1,14 +1,19 @@
+//Picture capturing function taken from
+//Rui Santos --  https://RandomNerdTutorials.com/esp32-cam-take-photo-save-microsd-card
+
 /*********
-  Picture capturing function taken from
-  Rui Santos --  https://RandomNerdTutorials.com/esp32-cam-take-photo-save-microsd-card
-  
-  IMPORTANT!!! 
+In order to have operation of GPIO 4 (to control dehumidifier) the SD card is only mounted when needed and then unmounted after all file operations have been completed
+Similiarly the sensors are only mounted when needed.
+This has the advantage of making these parts hotswapable. Camera is not hotswappable lol
+
+  Tips for flashing
    - GPIO 0 must be connected to GND to upload a sketch
    - After connecting GPIO 0 to GND, press the ESP32-CAM on-board RESET button to put your board in flashing mode
    - You may need to supply power to ESP board seperately 
-  - try to keep the same serial connection throughout flashing/ restarting
-*********/
+   - try to keep the same serial connection throughout flashing/ restarting
 
+
+*********/
 //lots of libraries
 #include "esp_camera.h"
 #include "Arduino.h"
@@ -29,10 +34,9 @@
 #include <SPI.h>
 #include "SparkFunBME280.h" //edit this library to change the i2c address if bme is not found
 #include <SparkFun_SGP30_Arduino_Library.h>
+#include <PubSubClient.h>
 
 
-// define the number of bytes you want to access
-#define EEPROM_SIZE 1
 
 // Pin definition for CAMERA_MODEL_AI_THINKER
 #define PWDN_GPIO_NUM     32
@@ -53,7 +57,6 @@
 #define PCLK_GPIO_NUM     22
 
 //global objects
-
 WiFiMulti wifiMulti;
 AsyncWebServer server(80);
 std::vector<String> files;
@@ -66,12 +69,18 @@ char lastcapture[20];
 long MAX_NUMBER_OF_FILES = 300; //Number of files to create before starting to delete old ones. This is a balance between speed of the /list endpoint
                                 // and how far back the timelapse images on the SD go 
 //hardware
-bool SDMounted = false;
-bool camera = false;
+bool cameraMounted = false;
+bool SDmounted = false;
 bool bmeMounted = false;
 bool sgpMounted = false;
 bool dehumidiferState = false;
 int dehumidifierControlPin = 4;
+
+BME280 bme280;
+SGP30 sgp30;
+
+TwoWire tw = TwoWire(0);
+
 //environ vals
 float temp =0;
 float humidity =0;
@@ -79,14 +88,23 @@ float co2 =0;
 float tvoc =0;
 int upperHumidityBound = 70;
 int lowerHumidityBound = 50;
-int sensorInterval = 5000;
-bool pauseSensorReading = false;
+int sensorInterval = 1000;
+bool pauseSensorReading = false;    //This is used as a flag to indicate sd mount needed
+int sensorPauseTime = 20000;
 //time
 const unsigned long THIRTY_MINS = 30*60*1000UL;
 const unsigned long TEN_MINS = 10*60*1000UL;
 const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 0;
 const int   daylightOffset_sec = 3600;
+
+// Add your MQTT Broker IP address, example:
+const char* mqtt_server = MQTTURL;
+WiFiClient espClient;
+PubSubClient mqttclient(espClient);
+long lastMsg = 0;
+char msg[50];
+int value = 0;
 
 
 const char start_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html>
@@ -143,6 +161,20 @@ const char start_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html>
     </script>
   </body>  
 </html>)rawliteral";
+
+//Function for debug
+void scanForWifi(){
+  Serial.print("wifi Scan start ... ");
+  int n = WiFi.scanNetworks();
+  Serial.print(n);
+  Serial.println(" network(s) found");
+  for (int i = 0; i < n; i++)
+  {
+    Serial.println(WiFi.SSID(i));
+    Serial.println(WiFi.RSSI(i));
+  }
+  Serial.println();
+}
 
 void listDir(fs::FS &fs, const char * dirname, uint8_t max_files){
   //sets vector array to contain file list, updates number of images count
@@ -248,7 +280,6 @@ void i2cScan(){
 }
 
 
-
 void initSensors(){
   //Wire.begin(13, 12);               //SDA orange, SCL purple      // Default is SDA 14, SCL 15
   TwoWire tw = TwoWire(0);
@@ -273,22 +304,49 @@ void initSensors(){
   }
 }
 
-void deInitSensors(){
-  //Wire.begin(1,3);
-  delay(500);
+bool mountSDCard(){
+  if(SDmounted){
+     Serial.println("SD Card already mounted :)");
+     return true;
+  }
+  if(!SD_MMC.begin("/sdcard", true)){       //1 bit mode to free up pins 12 and 13
+    Serial.println("SD Card Mount Failed");
+    delay(2000);
+    SDmounted = false;
+    return false;
+  } else {
+    esp_task_wdt_reset();
+    Serial.println("SD card mounted");
+    SDmounted = true;
+    uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
+    Serial.printf("SD Card Size: %lluMB\n", cardSize);
+    return true;
+  }
 }
 
+void unmountSDCard(){
+  SD_MMC.end();
+  SDmounted = false;
+  Serial.println("SD card unmounted");
+  pinMode(dehumidifierControlPin, OUTPUT);  //disable flash
+  digitalWrite(dehumidifierControlPin, LOW); 
+}
+
+
 void getSensorReadings(){
-  TwoWire tw = TwoWire(0);
-  tw.begin(13,12);
-  BME280 bme280;
-  SGP30 sgp30;
-  if(bme280.beginI2C(tw)){
-    bmeMounted = true;;
-  } 
-  if(sgp30.begin(tw)){
-    sgpMounted = true;
-    sgp30.initAirQuality();
+  //First 15 readings from SGP30 will be
+  //CO2: 400 ppm  TVOC: 0 ppb as it warms up
+
+  if(!bmeMounted){
+    if(bme280.beginI2C(tw)){
+      bmeMounted = true;
+    } 
+  }
+  if(!sgpMounted){
+    if(sgp30.begin(tw)){
+      sgpMounted = true;
+      sgp30.initAirQuality();
+    }
   }
 
 
@@ -304,7 +362,11 @@ void getSensorReadings(){
     co2 = sgp30.CO2;
     tvoc = sgp30.TVOC;
   }
+
+  char s[50];
+  snprintf_P(s, sizeof(s), PSTR("{'temp':%f, 'humidity':%f, 'co2':%f, 'tvoc':%f}"), temp, humidity, co2, tvoc);
   
+  mqttclient.publish("box/environ", s);
 }
 
 
@@ -315,6 +377,12 @@ void getSensorReadingsWeb(AsyncWebServerRequest *request){
 }
 
 void pressDehumidifierButton(){
+  while(SDmounted){
+    //Serial.println("waiting for pin 4 to be free :)");
+    delay(500); //wait for SD card to not be mounted so we can use pin 4
+    esp_task_wdt_reset();
+  }
+  pinMode(dehumidifierControlPin, OUTPUT);
   Serial.println("Switching dehumdifier");
   digitalWrite(dehumidifierControlPin, HIGH);  
   delay(500); 
@@ -328,11 +396,12 @@ void pressDehumidifierButtonWeb(AsyncWebServerRequest *request){
 }
 
 void downloadWeb(AsyncWebServerRequest *request){
+  esp_task_wdt_reset(); //feed watchdog here for when downloading loads of files via script
   pauseSensorReading = true;
   Serial.print("Received /download request from ");
   Serial.println(request->client()->remoteIP());
 
-  if(SDMounted){
+  if(mountSDCard()){
     int paramsNr = request->params();
     for(int i=0;i<paramsNr;i++){
 
@@ -350,6 +419,7 @@ void downloadWeb(AsyncWebServerRequest *request){
         }
       }
     }
+  
   } else {
     Serial.println("SD not mounted");
     request->send(404, "text/plain", "SD card not mounted");
@@ -393,15 +463,42 @@ void setLowerbound(AsyncWebServerRequest *request){
     }
 }
 
+void mqttMessageReceived(char* topic, byte* message, unsigned int length) {
+  Serial.print("Message arrived on topic: ");
+  Serial.print(topic);
+  Serial.print(". Message: ");
+  String messageTemp;
+  
+  for (int i = 0; i < length; i++) {
+    Serial.print((char)message[i]);
+    messageTemp += (char)message[i];
+  }
+  Serial.println();
+
+  // Feel free to add more if statements to control more GPIOs with MQTT
+
+  // If a message is received on the topic esp32/output, you check if the message is either "on" or "off". 
+  // Changes the output state according to the message
+  if (String(topic) == "esp32/output") {
+    Serial.print("Changing output to ");
+    if(messageTemp == "on"){
+      Serial.println("on");
+    }
+    else if(messageTemp == "off"){
+      Serial.println("off");
+    }
+  }
+}
 
 
 void setup() {
-  Serial.println("setup");
   WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); //disable brownout detector 
   Serial.begin(115200);
+  while (!Serial) { delay(10); } // Wait for serial console to open!
   //turn off flash
   pinMode(4, OUTPUT);
   digitalWrite(4, LOW);
+  delay(200);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -431,55 +528,29 @@ void setup() {
     config.jpeg_quality = 10;
     config.fb_count = 2;
   } else {
+    Serial.println("\nno psram found :( no HD");
     config.frame_size = FRAMESIZE_SVGA;
     config.jpeg_quality = 12;
     config.fb_count = 1;
   }
-  
-  
+
   // Init Camera
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
   } else {
-    camera = true;
+    cameraMounted = true;
     Serial.println("Camera detected");
     sensor_t * s = esp_camera_sensor_get();
     s -> set_lenc(s, 1);    //turn lens correction on (good for fisheye lens)
   }
 
-  //initSensors();
-  
-  //set up dehumidifier
-  pinMode(dehumidifierControlPin, OUTPUT);
-  Serial.println("SD card setup");
-  if(!SD_MMC.begin("/sdcard", true)){       //1 bit mode to free up pins 12 and 13
-    Serial.println("SD Card Mount Failed");
-    delay(2000);
-    //ESP.restart();
-  } else {
-    Serial.println("SD card mounted");
-    SDMounted = true;
-  }
-
-  uint64_t cardSize = SD_MMC.cardSize() / (1024 * 1024);
-  Serial.printf("SD_MMC Card Size: %lluMB\n", cardSize);
-  //Serial.println(("Listing files"));
-  //listDir(SD_MMC, "/", 0);
-
-
-  // Serial.print("wifi Scan start ... ");
-  // int n = WiFi.scanNetworks();
-  // Serial.print(n);
-  // Serial.println(" network(s) found");
-  // for (int i = 0; i < n; i++)
-  // {
-  //   Serial.println(WiFi.SSID(i));
-  //   Serial.println(WiFi.RSSI(i));
-  // }
-  // Serial.println();
-
-  wifiMulti.addAP(SSIDNAME, PASS);
+  mountSDCard();  //Check if SDCard is Attached
+  unmountSDCard();
+  //sensors
+  tw.begin(13,12);
+ 
+  wifiMulti.addAP(SSIDNAME, PASS);    //Add additional networks here
   wifiMulti.run();
   while (WiFi.status() != WL_CONNECTED) {
     Serial.print(".");
@@ -492,24 +563,30 @@ void setup() {
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
 
+  mqttclient.setServer(mqtt_server, 1883);
+  mqttclient.setCallback(mqttMessageReceived);
+
+
   configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
  
   //http endpoints
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", start_html);
+  });
+
   server.on("/download", downloadWeb);    //Download specified file e.g. /download?file=filename.jpg
-    
   server.on("/highBound", setUpperbound);
   server.on("/lowBound", setLowerbound);  
- 
   server.on("/environ", getSensorReadingsWeb);
-
   server.on("/press", pressDehumidifierButtonWeb);
 
   server.on("/list", HTTP_GET, [](AsyncWebServerRequest *request){
     pauseSensorReading = true;
-    delay(2000);
+    //delay(2000);
     Serial.print("/list from ");
     Serial.println(request->client()->remoteIP());
-    if(SDMounted){
+    if(mountSDCard()){
+      esp_task_wdt_reset();
       listDir(SD_MMC, "/", 0);
       String filesList;
       for (int i = 0; i < files.size(); i++){
@@ -517,16 +594,15 @@ void setup() {
           filesList += String(files[i]) + String("\n");
       }
 
-      if(numImages ==0){
+      if(numImages == 0){
         request->send(404, "text/plain", "No images found :( but SD is mounted");
         return;
       }
       request->send(200, "text/plain", filesList);
       Serial.print(numImages);
       Serial.println(" images found");
-      
     } else {
-      Serial.println("SD not mounted");
+      Serial.println("could not mount or find SD card");
       request->send(200, "text/plain", "SD not mounted");
     }
   });
@@ -534,7 +610,7 @@ void setup() {
   server.on("/latest", HTTP_GET, [](AsyncWebServerRequest *request){
     pauseSensorReading = true;
     if(!latestFile.equals("")){
-      if(SDMounted){
+      if(mountSDCard()){
         File file = SD_MMC.open(latestFile, FILE_READ);
         if(!file){
           Serial.println(" Failed to open file for reading");
@@ -543,9 +619,9 @@ void setup() {
         }else{
           request->send(file, latestFile, "text/xhr", true);
         }
-      
+        
       } else {
-        Serial.println("SD not mounted");
+        Serial.println("could not mount or find SD card");
         request->send(200, "text/plain", "SD not mounted");
       }
     } else {
@@ -554,10 +630,6 @@ void setup() {
     }
   });
 
-
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
-    request->send_P(200, "text/html", start_html);
-  });
 
   server.on("/time", HTTP_GET, [](AsyncWebServerRequest *request){
     pauseSensorReading =true;
@@ -573,8 +645,17 @@ void setup() {
 
 
 void takePicAndSave(){
-  pauseSensorReading = true;
   Serial.println("Preparing for photos");
+  
+  if(!cameraMounted){
+    Serial.println("Camera not mounted :(");
+    return;
+  }
+  if(!mountSDCard()){
+    return;
+  }
+ 
+  
   camera_fb_t * fb = NULL;
   refreshNetworkTime(true);
 
@@ -610,7 +691,8 @@ void takePicAndSave(){
   }
   file.close();
   esp_camera_fb_return(fb); 
-
+  pinMode(dehumidifierControlPin, OUTPUT);  //disable flash
+  digitalWrite(dehumidifierControlPin, LOW); 
 }
 
 
@@ -634,29 +716,53 @@ void operateDehumidifier(){   //if humidity too high turn off the dehumifier and
   }
 }
 
-
-
-void loop() {
-  if(SDMounted){
-    takePicAndSave(); //This method is called first so that latestFile can be set properly. It does delay startup a bit so not ideal
-  }
-
-  for (unsigned long i = 0; i < THIRTY_MINS/sensorInterval; i++) {    //exit this loop every half an hour to take pics ~
-    if(!pauseSensorReading){
-      getSensorReadings();
+void mqttreconnect() {
+  // Loop until we're reconnected
+  while (!mqttclient.connected()) {
+    Serial.print("Attempting MQTT connection...");
+    // Attempt to connect
+    if (mqttclient.connect("ESP8266Client")) {
+      Serial.println("connected");
+      // Subscribe
+      mqttclient.subscribe("esp32/output");
     } else {
-      delay(10000);
-      pauseSensorReading = false;
+      Serial.print("failed, rc=");
+      Serial.print(mqttclient.state());
+      Serial.println(" try again in 5 seconds");
+      // Wait 5 seconds before retrying
+      delay(5000);
     }
-
-    if(i%2){    //every other loop iteration
-      operateDehumidifier();
-    }
-    
-    delay(sensorInterval);
   }
-
-
 }
 
+void loop() {
+  if (!mqttclient.connected()) {    //setup mqtt
+    mqttreconnect();
+  }
+  mqttclient.loop();
 
+  delay(1000);
+  takePicAndSave(); //This method is called first so that latestFile can be set properly. It does delay startup a bit so not ideal
+  delay(1000); //delay to properly save
+
+  for (unsigned long i = 0; i < THIRTY_MINS/sensorInterval; i++) {    //exit this loop every half an hour to take pics ~
+    if(!pauseSensorReading){  
+      getSensorReadings();
+
+
+      if(i%5){    //every other loop iteration
+        operateDehumidifier();
+      }
+
+    } else {
+      pauseSensorReading = false;
+      delay(sensorPauseTime);
+      // check if pauseSensorReading has changed to true again in the delay period
+      if(!pauseSensorReading){
+        unmountSDCard(); 
+      } 
+    }
+
+    delay(sensorInterval);
+  }
+}
