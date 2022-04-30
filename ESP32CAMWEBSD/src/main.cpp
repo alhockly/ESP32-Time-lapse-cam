@@ -483,7 +483,7 @@ void mqttPublishSensorData(){
   char s[85];
   snprintf_P(s, sizeof(s), PSTR("{'temp':%f, 'humidity':%f, 'co2':%f, 'tvoc':%f}"), temp, humidity, co2, tvoc);
   mqttclient.publish("box/environ", s);
-  Serial.print("data published to MQTT server");
+  Serial.println("data published to MQTT server");
 }
 
 void mqttMessageReceived(char* topic, byte* message, unsigned int length) {
@@ -745,25 +745,18 @@ void operateDehumidifier(){   //if humidity too high turn off the dehumifier and
 
 
 void loop() {
-  
 
   delay(1000);
   takePicAndSave(); //This method is called first so that latestFile can be set properly. It does delay startup a bit so not ideal
   delay(1000); //delay to properly save
 
-  // if (!mqttclient.connected()) {    //setup mqtt
-  //   mqttreconnect();
-  // }
-  // if(mqttclient.connected()){
-  //   //mqttclient.loop();
-  // }
 
   for (unsigned long i = 0; i < THIRTY_MINS/sensorInterval; i++) {    //exit this loop every half an hour to take pics ~
     if(!pauseSensorReading){  
       
       getSensorReadings();
 
-      if(i%10){    //every other loop iteration
+      if(i%10 == 0){    //every 10 seconds
         operateDehumidifier();
         if(bmeMounted || sgpMounted){
           mqttPublishSensorData();
