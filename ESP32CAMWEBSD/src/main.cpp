@@ -51,13 +51,13 @@ String latestFile = "";   //these are different lol
 char lastcapture[20];     
 long MAX_NUMBER_OF_FILES = 300; //Number of files to create before starting to delete old ones. This is a balance between speed of the /list endpoint
                                 // and how far back the timelapse images on the SD go 
+bool latestimgPublished = false;
 //hardware
 bool cameraMounted = false;
 bool SDmounted = false;
 bool bmeMounted = false;
 bool sgpMounted = false;
-bool dehumidiferState = false;
-int dehumidifierControlPin = 4;
+
 
 BME280 bme280;
 SGP30 sgp30;
@@ -69,8 +69,7 @@ float temp =0;
 float humidity =0;
 float co2 =0;
 float tvoc =0;
-int upperHumidityBound = 70;
-int lowerHumidityBound = 50;
+
 int sensorInterval = 1000;
 bool pauseSensorReading = false;    //This is used as a flag to indicate sd mount needed
 int sensorPauseTime = 20000;
@@ -87,6 +86,7 @@ WiFiClientSecure espClient;
 
 
 PubSubClient mqttclient(espClient);
+
 long lastMsg = 0;
 char msg[50];
 int value = 0;
@@ -99,27 +99,9 @@ const char start_html[] PROGMEM = R"rawliteral(<!DOCTYPE HTML><html>
   <script src='https://code.jquery.com/jquery-2.2.4.js'></script>
 </head>
 <body>
-  <p>Dehumidifier settings</p>
-  <input type='number' id='lower' placeholder='lower humidity bound'></input><br><button id='setLower'>Set lower</button><br>
-  <br><input type='number' id='higher' placeholder='higher humidity bound'></input><br><button id ='setHigher'>Set higher</button>
   <p id="currentvals"></p>
   <img src="/latest" width="400px">
   <script>
-              function setLowerBound(){
-                var oReq = new XMLHttpRequest();
-                oReq.open("GET", "/lowBound?int="+document.getElementById("lower").value);
-                oReq.send();
-              }  
-
-              function setHigherBound(){
-                var oReq = new XMLHttpRequest();
-                oReq.open("GET", "/highBound?int="+document.getElementById("higher").value);
-                oReq.send();
-              } 
-              document.getElementById("setLower").onclick = function() {setLowerBound()};
-              document.getElementById("setHigher").onclick = function() {setHigherBound()};
-
-
               function getEnviron(){
                       var oReq = new XMLHttpRequest();
                       oReq.addEventListener("load", environDisplay);
@@ -314,8 +296,8 @@ void unmountSDCard(){
   SD_MMC.end();
   SDmounted = false;
   Serial.println("SD card unmounted");
-  pinMode(dehumidifierControlPin, OUTPUT);  //disable flash
-  digitalWrite(dehumidifierControlPin, LOW); 
+  pinMode(4, OUTPUT);  //disable flash
+  digitalWrite(4, LOW); 
 }
 
 
@@ -357,29 +339,14 @@ void getSensorReadings(){
 
 
 void getSensorReadingsWeb(AsyncWebServerRequest *request){
-  char s[135];
-  snprintf_P(s, sizeof(s), PSTR("{'temp':%f, 'humidity':%f, 'co2':%f, 'tvoc':%f, 'lowerBound':%i, 'upperBound':%i, dehumidifierState:%d}"), temp, humidity, co2, tvoc, lowerHumidityBound, upperHumidityBound, dehumidiferState);
+
+  char s[160];
+  snprintf_P(s, sizeof(s), PSTR("{\"temp\":%f, \"humidity\":%f, \"co2\":%f, \"tvoc\":%f}"), temp, humidity, co2, tvoc);
   request->send_P(200, "application/json", s);
 }
 
-void pressDehumidifierButton(){
-  while(SDmounted){
-    //Serial.println("waiting for pin 4 to be free :)");
-    delay(500); //wait for SD card to not be mounted so we can use pin 4
-    esp_task_wdt_reset();
-  }
-  pinMode(dehumidifierControlPin, OUTPUT);
-  Serial.println("Switching dehumdifier");
-  digitalWrite(dehumidifierControlPin, HIGH);  
-  delay(500); 
-  digitalWrite(dehumidifierControlPin, LOW); 
-  dehumidiferState = !dehumidiferState;
-}
 
-void pressDehumidifierButtonWeb(AsyncWebServerRequest *request){
-  pressDehumidifierButton();
-  request->send(200, "text/plain", "Dehumidifier switched");
-}
+
 
 void downloadWeb(AsyncWebServerRequest *request){
   esp_task_wdt_reset(); //feed watchdog here for when downloading loads of files via script
@@ -412,42 +379,7 @@ void downloadWeb(AsyncWebServerRequest *request){
   }
 }
 
-void setUpperbound(AsyncWebServerRequest *request){
-    int paramsNr = request->params();
-    for(int i=0;i<paramsNr;i++){
-      AsyncWebParameter* p = request->getParam(i);
-      String paramName = p->name();
-      String paramValue = p->value();
-      if(paramName=="int" && paramValue.toInt()!=0){
-        Serial.println("setting upper bound to");
-        Serial.println(paramValue);
-        upperHumidityBound = paramValue.toInt();
-        request->send(200, "text/plain", "upperBound set");
-      } else {
-        Serial.println("cast failed or int param not found");
-        request->send(400, "cast failed or int param not found");
-      }
-    }
-}
 
-void setLowerbound(AsyncWebServerRequest *request){
-    int paramsNr = request->params();
-    for(int i=0;i<paramsNr;i++){
-      AsyncWebParameter* p = request->getParam(i);
-      String paramName = p->name();
-      String paramValue = p->value();
-      if(paramName=="int" && paramValue.toInt()!=0){
-        Serial.println("setting lower bound to");
-        Serial.println(paramValue);
-        lowerHumidityBound = paramValue.toInt();
-        Serial.println(lowerHumidityBound);
-        request->send(200, "text/plain", "lowerBound set");
-      } else {
-        Serial.println("cast failed or int param not found");
-        request->send(400, "cast failed or int param not found");
-      }
-    }
-}
 
 void mqttreconnect() {
   int errcount = 0;
@@ -460,7 +392,8 @@ void mqttreconnect() {
     if (mqttclient.connect(clientId.c_str(), MQTTUSER, MQTTPASS)) {
       Serial.println("connected");
       // Subscribe
-      mqttclient.subscribe("esp32/output");
+      mqttclient.subscribe("ping");
+      
     } else {
       Serial.print("failed, rc=");
       Serial.print(mqttclient.state());
@@ -480,8 +413,11 @@ void mqttPublishSensorData(){
   if(!mqttclient.connected()){
     mqttreconnect();
   }
-  char s[85];
-  snprintf_P(s, sizeof(s), PSTR("{'temp':%f, 'humidity':%f, 'co2':%f, 'tvoc':%f}"), temp, humidity, co2, tvoc);
+
+
+
+  char s[160];
+  snprintf_P(s, sizeof(s), PSTR("{\"temp\":%f, \"humidity\":%f, \"co2\":%f, \"tvoc\":%f}"), temp, humidity, co2, tvoc);
   mqttclient.publish("box/environ", s);
   Serial.println("data published to MQTT server");
 }
@@ -498,18 +434,11 @@ void mqttMessageReceived(char* topic, byte* message, unsigned int length) {
   }
   Serial.println();
 
-  // Feel free to add more if statements to control more GPIOs with MQTT
 
-  // If a message is received on the topic esp32/output, you check if the message is either "on" or "off". 
-  // Changes the output state according to the message
-  if (String(topic) == "esp32/output") {
-    Serial.print("Changing output to ");
-    if(messageTemp == "on"){
-      Serial.println("on");
-    }
-    else if(messageTemp == "off"){
-      Serial.println("off");
-    }
+
+
+  if (String(topic) == "box/control/dehumidifier/press") {
+   
   }
 }
 
@@ -522,6 +451,10 @@ void setup() {
   pinMode(4, OUTPUT);
   digitalWrite(4, LOW);
   delay(200);
+  
+  // uint16_t bufsize= 90000;
+
+  // mqttclient.setBufferSize(bufsize);
 
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -545,6 +478,7 @@ void setup() {
   config.xclk_freq_hz = 20000000;
   config.pixel_format = PIXFORMAT_JPEG; 
   delay(200);
+
   if(psramFound()){
     Serial.println("\npsram enabled");
     config.frame_size = FRAMESIZE_UXGA; // FRAMESIZE_ + QVGA|CIF|VGA|SVGA|XGA|SXGA|UXGA
@@ -602,10 +536,8 @@ void setup() {
   });
 
   server.on("/download", downloadWeb);    //Download specified file e.g. /download?file=filename.jpg
-  server.on("/highBound", setUpperbound);
-  server.on("/lowBound", setLowerbound);  
   server.on("/environ", getSensorReadingsWeb);
-  server.on("/press", pressDehumidifierButtonWeb);
+
 
   server.on("/list", HTTP_GET, [](AsyncWebServerRequest *request){
     pauseSensorReading = true;
@@ -718,27 +650,88 @@ void takePicAndSave(){
   }
   file.close();
   esp_camera_fb_return(fb); 
-  pinMode(dehumidifierControlPin, OUTPUT);  //disable flash
-  digitalWrite(dehumidifierControlPin, LOW); 
+  pinMode(4, OUTPUT);  //disable flash
+  digitalWrite(4, LOW); 
+}
+
+char* string2char(String ipString){ // make it to return pointer not a single char
+  char* opChar = new char[ipString.length() + 1]; // local array should not be returned as it will be destroyed outside of the scope of this function. So create it with new operator.
+  memset(opChar, 0, ipString.length() + 1);
+
+  for (int i = 0; i < ipString.length(); i++)
+    opChar[i] = ipString.charAt(i);
+  return opChar; //Add this return statement.
 }
 
 
-void operateDehumidifier(){   //if humidity too high turn off the dehumifier and vice-versa
-  if(bmeMounted !=(float)0 && humidity!=(float)0){
-    Serial.println("checking dehumdifier");
-    if(dehumidiferState){ //dehumidifier on
-        if(humidity <= (float)lowerHumidityBound){
-          pressDehumidifierButton();
-        } else{
-          Serial.println("dehumdifier in the right state");
+void mqttPublishLatestPic(){
+  Serial.println("attempting to publish last pic");
+  if(!latestimgPublished){
+     if(mountSDCard()){
+        if(latestFile!=""){
+          File file = SD_MMC.open(latestFile, FILE_READ);
+          
+
+      
+          unsigned int fileSize = file.size();
+          Serial.println("file size: "+String(fileSize));
+          esp_task_wdt_reset();
+
+          // Serial.println("Allocating RAM");
+          // char *fileinput;
+          // fileinput = (char*)malloc(fileSize + 1);
+
+          // esp_task_wdt_reset();
+
+
+          Serial.println("Reading file");
+
+          // while(file.available()){
+          //   Serial.write(file.read());
+          // }
+          
+          const int maxFileSize = 5120;
+          static uint8_t buf[maxFileSize];
+          size_t len = 0;
+          uint32_t start = millis();
+          uint32_t end = start;
+          
+          len = file.size();
+          size_t flen = len;
+          start = millis();
+          while(len){
+              size_t toRead = len;
+              if(toRead > maxFileSize){
+                  toRead = maxFileSize;
+              }
+              file.read(buf, toRead);
+              len -= toRead;
+          }
+          end = millis() - start;
+          Serial.printf("%u bytes read for %u ms\n", flen, end);
+          file.close();
+          buf[fileSize] = '\0';
+          file.close();
+          SD_MMC.end();
+
+          esp_task_wdt_reset();
+
+
+          //Serial.println((char *)buf);
+
+
+          bool publishvar = mqttclient.publish("esp32/image", (char *)buf, true);
+
+          if(publishvar){
+            Serial.println("published image to mqtt");
+          }else{
+            Serial.println("publish failed");
+          }
+          latestimgPublished = true;
+          
+          unmountSDCard();
         }
-    } else{ //dehumidifer off
-      if(humidity >= (float)upperHumidityBound){
-        pressDehumidifierButton();
-      } else{
-        Serial.println("dehumdifier in the right state");
-      }
-    }
+     }
   }
 }
 
@@ -750,14 +743,22 @@ void loop() {
   takePicAndSave(); //This method is called first so that latestFile can be set properly. It does delay startup a bit so not ideal
   delay(1000); //delay to properly save
 
+    
+  //mqttreconnect();
+
+  //mqttPublishLatestPic();
 
   for (unsigned long i = 0; i < THIRTY_MINS/sensorInterval; i++) {    //exit this loop every half an hour to take pics ~
     if(!pauseSensorReading){  
+
+      if(!mqttclient.connected()){
+        mqttreconnect();
+      }
       
       getSensorReadings();
 
       if(i%10 == 0){    //every 10 seconds
-        operateDehumidifier();
+
         if(bmeMounted || sgpMounted){
           mqttPublishSensorData();
         }
